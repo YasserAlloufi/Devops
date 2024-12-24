@@ -1,140 +1,145 @@
-trigger:
-  branches:
-    include:
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
       - main
 
-pool:
-  vmImage: 'ubuntu-latest'
-
-variables:
-  PHP_VERSION: '8.1'
-  COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)/.composer'
-
-stages:
+jobs:
   # 1. Initialisation
-  - stage: Install
-    displayName: 'Initialisation'
-    jobs:
-      - job: InstallDependencies
-        displayName: 'Installer les dépendances'
-        steps:
-          - task: UsePythonVersion@0
-            inputs:
-              versionSpec: '3.x'
-              addToPath: true
+  install_dependencies:
+    name: Initialisation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-          - script: |
-              sudo apt-get update
-              sudo apt-get install -y php$(PHP_VERSION) php-cli php-mbstring unzip curl git
-              curl -sS https://getcomposer.org/installer | php
-              sudo mv composer.phar /usr/local/bin/composer
-            displayName: 'Installer PHP et Composer'
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
 
-          - script: |
-              npm install
-              composer install
-            displayName: 'Installer les dépendances (NPM et Composer)'
+      - name: Install PHP and Composer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php8.1 php-cli php-mbstring unzip curl git
+          curl -sS https://getcomposer.org/installer | php
+          sudo mv composer.phar /usr/local/bin/composer
+        shell: bash
+
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+
+      - name: Install Dependencies (NPM and Composer)
+        run: |
+          npm install
+          composer install
+        shell: bash
 
   # 2. Analyse de sécurité
-  - stage: SecurityAnalysis
-    displayName: 'Analyse de sécurité'
-    jobs:
-      - job: DependencyScan
-        displayName: 'Scanner les dépendances'
-        steps:
-          - script: |
-              curl -L -o dependency-check.zip https://github.com/jeremylong/DependencyCheck/releases/latest/download/dependency-check-7.4.4.zip
-              unzip dependency-check.zip -d dependency-check
-              ./dependency-check/bin/dependency-check.sh --project Akaunting --out ./dependency-report
-            displayName: 'OWASP Dependency-Check'
+  security_analysis:
+    name: Analyse de sécurité
+    runs-on: ubuntu-latest
+    needs: install_dependencies
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-          - script: |
-              npx retire --outputpath ./retirejs-report
-            displayName: 'Retire.js Scan'
+      - name: OWASP Dependency-Check
+        run: |
+          curl -L -o dependency-check.zip https://github.com/jeremylong/DependencyCheck/releases/latest/download/dependency-check-7.4.4.zip
+          unzip dependency-check.zip -d dependency-check
+          ./dependency-check/bin/dependency-check.sh --project Akaunting --out ./dependency-report
+        shell: bash
 
-      - job: CodeAnalysis
-        displayName: 'Analyse statique du code'
-        steps:
-          # SonarQube integration
-          - task: SonarCloudPrepare@1
-            inputs:
-              SonarQube: 'cloud-connection'  # Reference your SonarQube service connection name
-              scannerMode: 'CLI'
-              configMode: 'manual'
-              cliProjectKey: 'akaunting'
-              cliProjectName: 'Akaunting'
+      - name: Retire.js Scan
+        run: npx retire --outputpath ./retirejs-report
+        shell: bash
 
-          - script: |
-              sonar-scanner
-            displayName: 'Lancer l’analyse SonarQube'
+      - name: SonarQube Analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          sonar-scanner \
+            -Dsonar.projectKey=akaunting \
+            -Dsonar.organization=my-org \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+        shell: bash
 
   # 3. Compilation
-  - stage: Build
-    displayName: 'Construction'
-    dependsOn: SecurityAnalysis
-    jobs:
-      - job: BuildApplication
-        displayName: 'Construire l’application'
-        steps:
-          - script: |
-              npm run build
-            displayName: 'Construire les assets frontend'
+  build:
+    name: Construction
+    runs-on: ubuntu-latest
+    needs: security_analysis
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-          - script: |
-              php artisan migrate --force
-            displayName: 'Appliquer les migrations'
+      - name: Build Frontend Assets
+        run: npm run build
+        shell: bash
+
+      - name: Apply Database Migrations
+        run: php artisan migrate --force
+        shell: bash
 
   # 4. Tests
-  - stage: Testing
-    displayName: 'Tests'
-    dependsOn: Build
-    jobs:
-      - job: UnitTests
-        displayName: 'Exécuter les tests unitaires'
-        steps:
-          - script: |
-              ./vendor/bin/phpunit --testdox
-            displayName: 'Tests unitaires PHP'
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-      - job: FunctionalTests
-        displayName: 'Exécuter les tests fonctionnels'
-        steps:
-          - script: |
-              npm run test
-            displayName: 'Tests fonctionnels (Frontend)'
+      - name: Run Unit Tests
+        run: ./vendor/bin/phpunit --testdox
+        shell: bash
+
+      - name: Run Functional Tests (Frontend)
+        run: npm run test
+        shell: bash
 
   # 5. Déploiement
-  - stage: Deploy
-    displayName: 'Déploiement'
-    dependsOn: Testing
-    jobs:
-      - deployment: DeployToStaging
-        displayName: 'Déployer sur l’environnement de staging'
-        environment: 'staging'
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - script: |
-                    echo "Déploiement vers staging..."
-                    az webapp deployment source config-zip \
-                      --resource-group $(ResourceGroup) \
-                      --name $(AppServiceName) \
-                      --src $(Pipeline.Workspace)/build.zip
-                  displayName: 'Déploiement via Azure CLI'
+  deploy:
+    name: Déploiement
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Deploy to Staging
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          echo "Déploiement vers staging..."
+          az webapp deployment source config-zip \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --name ${{ secrets.APP_SERVICE_NAME }} \
+            --src build.zip
+        shell: bash
 
   # 6. Surveillance post-déploiement
-  - stage: Monitoring
-    displayName: 'Surveillance'
-    dependsOn: Deploy
-    jobs:
-      - job: PostDeploymentMonitoring
-        displayName: 'Configurer la surveillance continue'
-        steps:
-          - script: |
-              snyk monitor
-            displayName: 'Surveillance avec Snyk'
+  monitoring:
+    name: Surveillance
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-          - script: |
-              echo "Configurer les alertes Azure Security Center"
-            displayName: 'Azure Security Center'
+      - name: Surveillance avec Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: snyk monitor
+        shell: bash
+
+      - name: Configurer les alertes Azure Security Center
+        run: echo "Configurer les alertes Azure Security Center"
+        shell: bash
