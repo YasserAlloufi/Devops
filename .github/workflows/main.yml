@@ -1,0 +1,140 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  PHP_VERSION: '8.1'
+  COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)/.composer'
+
+stages:
+  # 1. Initialisation
+  - stage: Install
+    displayName: 'Initialisation'
+    jobs:
+      - job: InstallDependencies
+        displayName: 'Installer les dépendances'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - script: |
+              sudo apt-get update
+              sudo apt-get install -y php$(PHP_VERSION) php-cli php-mbstring unzip curl git
+              curl -sS https://getcomposer.org/installer | php
+              sudo mv composer.phar /usr/local/bin/composer
+            displayName: 'Installer PHP et Composer'
+
+          - script: |
+              npm install
+              composer install
+            displayName: 'Installer les dépendances (NPM et Composer)'
+
+  # 2. Analyse de sécurité
+  - stage: SecurityAnalysis
+    displayName: 'Analyse de sécurité'
+    jobs:
+      - job: DependencyScan
+        displayName: 'Scanner les dépendances'
+        steps:
+          - script: |
+              curl -L -o dependency-check.zip https://github.com/jeremylong/DependencyCheck/releases/latest/download/dependency-check-7.4.4.zip
+              unzip dependency-check.zip -d dependency-check
+              ./dependency-check/bin/dependency-check.sh --project Akaunting --out ./dependency-report
+            displayName: 'OWASP Dependency-Check'
+
+          - script: |
+              npx retire --outputpath ./retirejs-report
+            displayName: 'Retire.js Scan'
+
+      - job: CodeAnalysis
+        displayName: 'Analyse statique du code'
+        steps:
+          # SonarQube integration
+          - task: SonarCloudPrepare@1
+            inputs:
+              SonarQube: 'cloud-connection'  # Reference your SonarQube service connection name
+              scannerMode: 'CLI'
+              configMode: 'manual'
+              cliProjectKey: 'akaunting'
+              cliProjectName: 'Akaunting'
+
+          - script: |
+              sonar-scanner
+            displayName: 'Lancer l’analyse SonarQube'
+
+  # 3. Compilation
+  - stage: Build
+    displayName: 'Construction'
+    dependsOn: SecurityAnalysis
+    jobs:
+      - job: BuildApplication
+        displayName: 'Construire l’application'
+        steps:
+          - script: |
+              npm run build
+            displayName: 'Construire les assets frontend'
+
+          - script: |
+              php artisan migrate --force
+            displayName: 'Appliquer les migrations'
+
+  # 4. Tests
+  - stage: Testing
+    displayName: 'Tests'
+    dependsOn: Build
+    jobs:
+      - job: UnitTests
+        displayName: 'Exécuter les tests unitaires'
+        steps:
+          - script: |
+              ./vendor/bin/phpunit --testdox
+            displayName: 'Tests unitaires PHP'
+
+      - job: FunctionalTests
+        displayName: 'Exécuter les tests fonctionnels'
+        steps:
+          - script: |
+              npm run test
+            displayName: 'Tests fonctionnels (Frontend)'
+
+  # 5. Déploiement
+  - stage: Deploy
+    displayName: 'Déploiement'
+    dependsOn: Testing
+    jobs:
+      - deployment: DeployToStaging
+        displayName: 'Déployer sur l’environnement de staging'
+        environment: 'staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: |
+                    echo "Déploiement vers staging..."
+                    az webapp deployment source config-zip \
+                      --resource-group $(ResourceGroup) \
+                      --name $(AppServiceName) \
+                      --src $(Pipeline.Workspace)/build.zip
+                  displayName: 'Déploiement via Azure CLI'
+
+  # 6. Surveillance post-déploiement
+  - stage: Monitoring
+    displayName: 'Surveillance'
+    dependsOn: Deploy
+    jobs:
+      - job: PostDeploymentMonitoring
+        displayName: 'Configurer la surveillance continue'
+        steps:
+          - script: |
+              snyk monitor
+            displayName: 'Surveillance avec Snyk'
+
+          - script: |
+              echo "Configurer les alertes Azure Security Center"
+            displayName: 'Azure Security Center'
