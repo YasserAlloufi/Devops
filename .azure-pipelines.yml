@@ -1,3 +1,10 @@
+stages:
+  Install
+  SecurityAnalysis
+  Build
+  Testing
+  Deploy
+  Monitoring
 trigger:
   branches:
     include:
