@@ -16,6 +16,7 @@ pool:
 variables:
   PHP_VERSION: '8.1'
   COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)/.composer'
+  AppServiceName: 'akaunting'
 
 stages:
   # 1. Initialisation
@@ -42,6 +43,10 @@ stages:
               composer install
             displayName: 'Installer les dépendances (NPM et Composer)'
 
+          - script: |
+              npm install -g snyk
+            displayName: 'Installer Snyk'
+
   # 2. Analyse de sécurité
   - stage: SecurityAnalysis
     displayName: 'Analyse de sécurité'
@@ -59,13 +64,16 @@ stages:
               npx retire --outputpath ./retirejs-report
             displayName: 'Retire.js Scan'
 
+          - script: |
+              snyk test
+            displayName: 'Analyse de sécurité avec Snyk'
+
       - job: CodeAnalysis
         displayName: 'Analyse statique du code'
         steps:
-          # SonarQube integration
           - task: SonarCloudPrepare@1
             inputs:
-              SonarQube: 'cloud-connection'  # Reference your SonarQube service connection name
+              SonarQube: 'cloud-connection'
               scannerMode: 'CLI'
               configMode: 'manual'
               cliProjectKey: 'akaunting'
