@@ -2,7 +2,8 @@
 
 use Illuminate\Support\Facades\Route;
 use Livewire\Livewire;
-
+use App\Http\Controllers\Auth\login;
+Route::get('/login', [login::class, 'showLoginForm'])->name('login');
 /**
  * 'web' middleware applied to all routes
  *
@@ -17,3 +18,9 @@ use Livewire\Livewire;
 Route::get('/index', [IndexController::class, 'show'])->name('index');
 Route::get('/register', [RegisterController::class, 'show'])->name('register');
 Route::post('/register', [RegisterController::class, 'store']);
+Route::get('/login', function () {
+    return view('create');
+});
+Route::get('/', function () {
+    return view('index');
+});
